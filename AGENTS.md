@@ -1,22 +1,73 @@
-# AGENTS.md — C# Dev Container
+# AGENTS.md
 
-This repo provides the **development environment** (Docker/Devcontainer config), not a C# application. There are no test, lint, build, or format commands to run.
+.NET 10 Clean Architecture template (DDD + CQRS). 5 projects, PostgreSQL, JWT, Serilog.
 
-## Structure
+## Devcontainer
 
-- `.devcontainer/Dockerfile.dev` — .NET 10.0 SDK (Ubuntu Noble base) with Docker CLI, buildx, `just`, `dotnet-ef`, PostgreSQL dev libs
-- `.devcontainer/docker-compose.yml` — mounts repo to `/home/developer/app`, binds Docker socket, VS Code extensions volume
-- `.devcontainer/docker-compose.override.yml` — host UID/GID/DOCKER_GROUP_ID overrides (tracked in git)
-- `.devcontainer/devcontainer.json` — VS Code config: service `app`, workspace `/home/developer/app`, remote user `developer`
-- `global.json` — SDK `10.0.300`, `rollForward: latestPatch`
+- Workspace mounted at `/workspace` via Docker Compose (DooD pattern — Docker socket shared from host)
+- `.devcontainer/Dockerfile.dev`: uses .NET 10 SDK + Docker CLI, buildx, compose plugin, `just`, `dotnet-ef`
+- UID/GID/DOCKER_GROUP_ID must match host — set in `.devcontainer/docker-compose.override.yml` (tracked in git)
+- Base image is **Ubuntu Noble** — Docker repo URL must use `linux/ubuntu`, not `linux/debian`
+- Pre-existing `ubuntu` user at UID 1000 is removed before creating `developer`
+- `devcontainer.json`: service `app`, `remoteUser: developer`, workspace at `/workspace`
+- After rebuild, `onCreateCommand` chowns workspace + vscode-server volume to `developer`
+- Docker port 5000 is bound to **Windows localhost only** — from WSL2 use container networking internally
 
-## Key facts
+## Application architecture
 
-- **Workspace in container:** `/home/developer/app`
-- **Pre-installed tools:** `dotnet-ef` (global tool), `just` (1.51.0), Docker CLI + buildx
-- **UID/GID mismatch** is the most common build failure — set `UID`, `GID`, `DOCKER_GROUP_ID` in `docker-compose.override.yml` or environment to match the host
-- **Base image is Ubuntu Noble** (not Debian) — the Docker repository URL must use `linux/ubuntu`, not `linux/debian`
-- **User conflict on UID 1000** — the base image already has an `ubuntu` user with UID 1000; the Dockerfile removes it before creating `developer`
-- **No `.gitignore`** — `docker-compose.override.yml` is intentionally tracked
-- **No test/lint scripts exist** — the consuming app defines those
-- **All devcontainer files are under `.devcontainer/`** — the project root stays clean for the consuming application
+```
+src/
+├── SharedKernel/     — DDD abstractions (Entity, Error, Result, IDomainEvent, IDateTimeProvider)
+├── Domain/           — entities, value objects, domain events (TodoItem, User) — depends only on SharedKernel
+├── Application/      — CQRS commands/queries, handlers, validation — depends on Domain + SharedKernel
+├── Infrastructure/   — EF Core (Npgsql), JWT auth, permissions, Serilog — depends on Application
+└── Web.Api/          — minimal API endpoints, middleware, Program (entrypoint) — depends on Infrastructure
+tests/
+└── ArchitectureTests/ — NetArchTest layer dependency enforcement
+```
+
+- **Dependency flow**: SharedKernel → Domain → Application → Infrastructure → Web.Api (innermost→outer)
+- **No Controllers** — endpoints are `IEndpoint` implementations registered via Scrutor scanning
+- **CQRS**: `ICommand<TResponse>`, `IQuery<TResponse>`, handlers decorated with logging + validation via Scrutor's `Decorate`
+- **DI registration**: Scrutor scans assemblies in `Application.DependencyInjection`; `Infrastructure.DependencyInjection` wires EF, auth
+- **Auth**: JWT bearer + custom permission-based `IAuthorizationHandler` and `PermissionAuthorizationPolicyProvider`
+- **Domain events**: dispatched via `IDomainEventsDispatcher` before `SaveChangesAsync`
+- **Result pattern**: `Result<T>` from SharedKernel, mapped to HTTP via `CustomResults.Problem`
+- **Explicit typing** preferred (`.editorconfig`: `csharp_style_var_elsewhere = false`)
+- **File-scoped namespaces**, `is null`/`is not null` checks, `internal sealed` types by default
+
+## Running
+
+```bash
+# Start application services (inside devcontainer)
+docker compose up -d
+
+# Run single command
+dotnet build CleanArchitecture.slnx
+dotnet test tests/ArchitectureTests/ArchitectureTests.csproj
+dotnet run --project src/Web.Api/Web.Api.csproj
+
+# EF migrations (dotnet-ef pre-installed in devcontainer)
+dotnet ef migrations add <name> --project src/Infrastructure --startup-project src/Web.Api
+dotnet ef database update --project src/Infrastructure --startup-project src/Web.Api
+```
+
+CI runs `dotnet restore → build → test → publish CleanArchitecture.slnx` on push to `main` (.NET 10.x).
+
+## Infrastructure services
+
+| Service | Port | Notes |
+|---------|------|-------|
+| web-api | 5000 (HTTP), 5001 (HTTPS) | .NET app, JWT auth |
+| postgres | 5432 | Database: `clean-architecture`, user/pass: `postgres` |
+| seq | 8081 | Structured log viewer |
+
+Connection strings reference `host.docker.internal` for reaching the host from containers.
+
+## Key differences from defaults
+
+- `TreatWarningsAsErrors` + `AnalysisMode=All` + `EnforceCodeStyleInBuild` enabled (`Directory.Build.props`)
+- SonarAnalyzer.CSharp as analyzer in all non-dcproj projects
+- Central package management (`Directory.Packages.props`)
+- No `justfile` yet (just CLI is installed)
+- `.editorconfig` is 419 lines with strict CA/IDE/Sonar rules — many disabled intentionally
