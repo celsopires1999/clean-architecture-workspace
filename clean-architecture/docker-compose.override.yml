@@ -6,6 +6,8 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    extra_hosts:
+      - host.docker.internal:host-gateway
 
   web-api:
     depends_on:
@@ -19,3 +21,5 @@ services:
       - "8080"
     volumes:
       - ~/.microsoft/usersecrets:/root/.microsoft/usersecrets:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
