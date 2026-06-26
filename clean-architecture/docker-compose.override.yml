@@ -6,8 +6,6 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
-    extra_hosts:
-      - host.docker.internal:host-gateway
 
   web-api:
     depends_on:
